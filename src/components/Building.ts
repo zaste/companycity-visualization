@@ -14,11 +14,10 @@ export interface BuildingConfig {
   scale: number;
 }
 
-export interface BuildingEffects {
-  windows: THREE.Mesh[];
-  beacon: THREE.Mesh;
-  activity: THREE.Mesh;
-  trails: THREE.Object3D[];
+export interface WindowLight {
+  mesh: THREE.Mesh;
+  originalOpacity: number;
+  flickerSpeed: number;
 }
 
 export class Building {
@@ -26,9 +25,11 @@ export class Building {
   public readonly data: NodeData;
   
   private config: BuildingConfig;
-  private mainStructure?: ExtendedMesh;
-  private effects: BuildingEffects;
   private districtColor: number;
+  private mainStructure?: ExtendedMesh;
+  private beacon?: ExtendedMesh;
+  private activityIndicator?: ExtendedMesh;
+  private windowLights: WindowLight[] = [];
   private isSelected: boolean = false;
   private isHovered: boolean = false;
   private isParentSelected: boolean = false;
@@ -38,7 +39,6 @@ export class Building {
     this.data = data;
     this.districtColor = districtColor;
     this.config = config;
-    this.pulseOffset = Math.random() * Math.PI * 2;
     
     this.group = new THREE.Group() as ExtendedGroup;
     this.group.userData = {
@@ -49,64 +49,70 @@ export class Building {
       nodeType: data.type,
     };
     
-    this.effects = {
-      windows: [],
-      beacon: new THREE.Mesh(),
-      activity: new THREE.Mesh(),
-      trails: [],
-    };
+    // Create unique pulse offset for this building
+    this.pulseOffset = (data.relPos.x + data.relPos.z) * 0.1;
     
     this.initialize();
   }
 
   private initialize(): void {
     this.createMainStructure();
-    this.createWindows();
+    this.createWindowLights();
     this.createBeacon();
     this.createActivityIndicator();
-    
-    if (this.config.enableAnimations && this.config.quality !== 'low') {
-      this.createTrailEffects();
-    }
   }
 
   private createMainStructure(): void {
     const baseSize = 6 + Math.random() * 4;
     const height = 10 + Math.random() * 15;
-    const nodeType = this.data.type || 'service';
     
-    // Get geometry based on node type
-    const shapeType = NODE_TYPE_CONFIGS[nodeType]?.shape || 'cylinder';
-    let geometryType: 'box' | 'cylinder' | 'hexagon';
+    // Get geometry based on node type or random
+    const nodeConfig = this.data.type ? NODE_TYPE_CONFIGS[this.data.type] : null;
+    const shapeType = nodeConfig?.shape || this.getRandomShape();
+    
+    let geometry: THREE.BufferGeometry;
     
     switch (shapeType) {
-      case 'box':
-        geometryType = 'box';
-        break;
       case 'cylinder':
-        geometryType = 'cylinder';
+        geometry = geometryFactory.createBuilding({
+          baseSize,
+          height,
+          type: 'cylinder',
+          segments: 8,
+        });
         break;
+        
       case 'sphere':
-        geometryType = 'cylinder'; // Use cylinder as fallback
+        geometry = geometryFactory.createBuilding({
+          baseSize: baseSize * 0.8,
+          height: baseSize * 0.8,
+          type: 'cylinder',
+          segments: 16,
+        });
+        // Convert to sphere-like
         break;
+        
       case 'octahedron':
-        geometryType = 'hexagon';
+        geometry = new THREE.OctahedronGeometry(baseSize * 0.7);
         break;
+        
+      case 'box':
       default:
-        geometryType = 'cylinder';
+        geometry = geometryFactory.createBuilding({
+          baseSize,
+          height,
+          type: 'box',
+        });
+        break;
     }
     
-    const geometry = geometryFactory.createBuilding({
-      baseSize,
-      height,
-      type: geometryType,
-      segments: this.config.quality === 'high' ? 16 : 8,
-    });
+    // Use node type color if available, otherwise district color
+    const buildingColor = nodeConfig?.color || this.districtColor;
     
     const material = materialFactory.createBuildingMaterial({
-      nodeType,
       buildingType: 'standard',
-      animated: this.config.enableAnimations,
+      nodeType: this.data.type,
+      color: buildingColor,
     });
     
     this.mainStructure = new THREE.Mesh(geometry, material) as ExtendedMesh;
@@ -119,38 +125,46 @@ export class Building {
       type: 'building-structure',
       component: this,
       parentNode: this.data.id,
-      nodeType: this.data.type,
-      baseSize,
-      height,
+      height: height,
+      baseSize: baseSize,
     };
     
     this.group.add(this.mainStructure);
   }
 
-  private createWindows(): void {
-    if (!this.mainStructure || this.config.quality === 'low') return;
+  private createWindowLights(): void {
+    if (!this.mainStructure) return;
     
-    const height = this.mainStructure.userData.height;
-    const baseSize = this.mainStructure.userData.baseSize;
+    const height = this.mainStructure.userData.height as number;
+    const baseSize = this.mainStructure.userData.baseSize as number;
     const levels = Math.floor(height / 5);
-    const nodeColor = NODE_TYPE_CONFIGS[this.data.type || 'service'].color;
     
-    for (let level = 0; level < levels; level++) {
+    // Use node type color for windows
+    const nodeConfig = this.data.type ? NODE_TYPE_CONFIGS[this.data.type] : null;
+    const windowColor = nodeConfig?.color || this.districtColor;
+    
+    for (let i = 0; i < levels; i++) {
       const windowGeometry = new THREE.PlaneGeometry(baseSize * 0.8, 0.8);
-      const windowMaterial = materialFactory.createWindowMaterial(nodeColor);
+      const windowMaterial = materialFactory.createWindowMaterial(
+        windowColor,
+        0.3 + Math.random() * 0.3
+      );
       
       // Front and back windows
       for (let side = 0; side < 2; side++) {
         const window = new THREE.Mesh(windowGeometry, windowMaterial);
-        window.position.y = 5 + level * 5;
+        window.position.y = 5 + i * 5;
         window.position.z = side === 0 ? baseSize * 0.51 : -baseSize * 0.51;
+        if (side === 1) window.rotation.y = Math.PI;
         
-        if (side === 1) {
-          window.rotation.y = Math.PI;
-        }
+        const windowLight: WindowLight = {
+          mesh: window,
+          originalOpacity: windowMaterial.opacity,
+          flickerSpeed: 0.5 + Math.random() * 1.5,
+        };
         
-        this.effects.windows.push(window);
-        this.group.add(window);
+        this.windowLights.push(windowLight);
+        this.mainStructure!.add(window);
       }
     }
   }
@@ -158,125 +172,118 @@ export class Building {
   private createBeacon(): void {
     if (!this.mainStructure) return;
     
-    const height = this.mainStructure.userData.height;
-    const baseSize = this.mainStructure.userData.baseSize;
-    const nodeColor = NODE_TYPE_CONFIGS[this.data.type || 'service'].color;
+    const height = this.mainStructure.userData.height as number;
+    const baseSize = this.mainStructure.userData.baseSize as number;
     
     const beaconGeometry = new THREE.BoxGeometry(baseSize * 0.8, 1, baseSize * 0.8);
-    const beaconMaterial = materialFactory.createGlowMaterial(nodeColor, 0.6);
+    const nodeConfig = this.data.type ? NODE_TYPE_CONFIGS[this.data.type] : null;
+    const beaconColor = nodeConfig?.color || this.districtColor;
     
-    this.effects.beacon = new THREE.Mesh(beaconGeometry, beaconMaterial);
-    this.effects.beacon.position.y = height + 3.5;
+    const beaconMaterial = materialFactory.createGlowMaterial(beaconColor, 0.6);
     
-    this.group.add(this.effects.beacon);
+    this.beacon = new THREE.Mesh(beaconGeometry, beaconMaterial) as ExtendedMesh;
+    this.beacon.position.y = height + 3.5;
+    
+    this.beacon.userData = {
+      id: `${this.data.id}-beacon`,
+      type: 'building-beacon',
+      component: this,
+    };
+    
+    this.mainStructure.add(this.beacon);
   }
 
   private createActivityIndicator(): void {
     if (!this.mainStructure) return;
     
-    const height = this.mainStructure.userData.height;
-    const nodeColor = NODE_TYPE_CONFIGS[this.data.type || 'service'].color;
+    const height = this.mainStructure.userData.height as number;
     
     const activityGeometry = new THREE.SphereGeometry(1, 8, 6);
-    const activityMaterial = materialFactory.createGlowMaterial(nodeColor, 0.8);
+    const nodeConfig = this.data.type ? NODE_TYPE_CONFIGS[this.data.type] : null;
+    const activityColor = nodeConfig?.color || this.districtColor;
     
-    this.effects.activity = new THREE.Mesh(activityGeometry, activityMaterial);
-    this.effects.activity.position.y = height + 5;
+    const activityMaterial = materialFactory.createGlowMaterial(activityColor, 0.8);
     
-    this.group.add(this.effects.activity);
+    this.activityIndicator = new THREE.Mesh(activityGeometry, activityMaterial) as ExtendedMesh;
+    this.activityIndicator.position.y = height + 5;
+    
+    this.activityIndicator.userData = {
+      id: `${this.data.id}-activity`,
+      type: 'building-activity',
+      component: this,
+    };
+    
+    this.mainStructure.add(this.activityIndicator);
   }
 
-  private createTrailEffects(): void {
-    if (this.config.quality === 'low') return;
+  private getRandomShape(): 'box' | 'cylinder' | 'sphere' | 'octahedron' {
+    const shapes = ['box', 'cylinder', 'sphere'] as const;
+    const weights = [0.5, 0.3, 0.2]; // 50% box, 30% cylinder, 20% sphere
     
-    // Create subtle particle trails for active nodes
-    const nodeColor = NODE_TYPE_CONFIGS[this.data.type || 'service'].color;
+    const random = Math.random();
+    let cumulative = 0;
     
-    for (let i = 0; i < 3; i++) {
-      const trailGeometry = new THREE.SphereGeometry(0.2, 4, 3);
-      const trailMaterial = materialFactory.createGlowMaterial(nodeColor, 0.3);
-      
-      const trail = new THREE.Mesh(trailGeometry, trailMaterial);
-      trail.visible = false; // Start invisible
-      
-      this.effects.trails.push(trail);
-      this.group.add(trail);
+    for (let i = 0; i < shapes.length; i++) {
+      cumulative += weights[i];
+      if (random <= cumulative) {
+        return shapes[i];
+      }
     }
+    
+    return 'box';
   }
 
   public update(deltaTime: number, elapsedTime: number): void {
     if (!this.config.enableAnimations) return;
     
-    // Animate main structure pulsing
+    // Pulse animation on main structure
     if (this.mainStructure) {
       const pulseScale = 1 + Math.sin(elapsedTime * 1.5 + this.pulseOffset) * 0.03;
       this.mainStructure.scale.y = pulseScale;
     }
     
-    // Animate beacon
-    const beaconOpacity = 0.4 + Math.sin(elapsedTime * 3 + this.pulseOffset) * 0.3;
-    materialFactory.updateMaterialOpacity(this.effects.beacon.material as THREE.Material, beaconOpacity);
-    
-    // Animate activity indicator
-    const activityScale = 0.8 + Math.sin(elapsedTime * 4 + this.pulseOffset) * 0.4;
-    this.effects.activity.scale.setScalar(activityScale);
-    
-    const activityOpacity = 0.6 + Math.sin(elapsedTime * 4 + this.pulseOffset) * 0.2;
-    materialFactory.updateMaterialOpacity(this.effects.activity.material as THREE.Material, activityOpacity);
-    
-    // Animate windows
-    this.effects.windows.forEach((window, index) => {
-      const windowOpacity = 0.3 + Math.sin(elapsedTime * 2 + index * 0.5 + this.pulseOffset) * 0.2;
-      materialFactory.updateMaterialOpacity(window.material as THREE.Material, windowOpacity);
-    });
-    
-    // Animate trails
-    this.updateTrails(elapsedTime);
-    
-    // Update based on selection state
-    this.updateSelectionEffects(elapsedTime);
-  }
-
-  private updateTrails(elapsedTime: number): void {
-    if (this.config.quality === 'low' || !this.isActive()) return;
-    
-    this.effects.trails.forEach((trail, index) => {
-      const offset = index * (Math.PI * 2 / 3);
-      const radius = 8;
-      const speed = 1 + index * 0.2;
-      
-      trail.position.x = Math.cos(elapsedTime * speed + offset) * radius;
-      trail.position.z = Math.sin(elapsedTime * speed + offset) * radius;
-      trail.position.y = 8 + Math.sin(elapsedTime * 2 + offset) * 3;
-      
-      trail.visible = this.isSelected || this.isParentSelected;
-      
-      if (trail.visible) {
-        const opacity = 0.3 + Math.sin(elapsedTime * 3 + offset) * 0.2;
-        materialFactory.updateMaterialOpacity(trail.material as THREE.Material, opacity);
-      }
-    });
-  }
-
-  private updateSelectionEffects(elapsedTime: number): void {
-    if (!this.mainStructure) return;
-    
-    let emissiveIntensity = 0.1;
-    
-    if (this.isSelected) {
-      emissiveIntensity = 0.3 + Math.sin(elapsedTime * 4) * 0.1;
-    } else if (this.isHovered) {
-      emissiveIntensity = 0.2 + Math.sin(elapsedTime * 2) * 0.05;
-    } else if (this.isParentSelected) {
-      emissiveIntensity = 0.15;
+    // Beacon animation
+    if (this.beacon) {
+      const beaconPulse = 0.4 + Math.sin(elapsedTime * 3 + this.pulseOffset) * 0.3;
+      materialFactory.updateMaterialOpacity(this.beacon.material as THREE.Material, beaconPulse);
     }
     
-    const nodeColor = NODE_TYPE_CONFIGS[this.data.type || 'service'].color;
-    materialFactory.updateMaterialEmissive(
-      this.mainStructure.material as THREE.Material,
-      nodeColor,
-      emissiveIntensity
-    );
+    // Activity indicator animation
+    if (this.activityIndicator) {
+      const activityScale = 0.8 + Math.sin(elapsedTime * 4 + this.pulseOffset) * 0.4;
+      this.activityIndicator.scale.setScalar(activityScale);
+      
+      const activityOpacity = 0.6 + Math.sin(elapsedTime * 4 + this.pulseOffset) * 0.2;
+      materialFactory.updateMaterialOpacity(this.activityIndicator.material as THREE.Material, activityOpacity);
+    }
+    
+    // Window lights flickering
+    this.windowLights.forEach((windowLight, index) => {
+      const flicker = Math.sin(elapsedTime * windowLight.flickerSpeed + index) * 0.1;
+      const opacity = Math.max(0.1, windowLight.originalOpacity + flicker);
+      materialFactory.updateMaterialOpacity(windowLight.mesh.material as THREE.Material, opacity);
+    });
+    
+    // Enhanced effects when selected or hovered
+    if (this.isSelected || this.isHovered || this.isParentSelected) {
+      this.updateEnhancedEffects(elapsedTime);
+    }
+  }
+
+  private updateEnhancedEffects(elapsedTime: number): void {
+    const intensity = this.isSelected ? 2.0 : (this.isHovered ? 1.5 : 1.2);
+    
+    // Enhanced beacon glow
+    if (this.beacon) {
+      const enhancedGlow = 0.6 * intensity + Math.sin(elapsedTime * 5) * 0.2;
+      materialFactory.updateMaterialOpacity(this.beacon.material as THREE.Material, enhancedGlow);
+    }
+    
+    // Enhanced activity indicator
+    if (this.activityIndicator) {
+      const enhancedActivity = 0.8 * intensity + Math.sin(elapsedTime * 6) * 0.3;
+      materialFactory.updateMaterialOpacity(this.activityIndicator.material as THREE.Material, enhancedActivity);
+    }
   }
 
   public setSelected(selected: boolean): void {
@@ -301,26 +308,53 @@ export class Building {
   }
 
   private updateVisualState(): void {
-    // Visual state is updated in the update() method for smooth animations
-    // This method can be used for immediate state changes if needed
+    if (!this.mainStructure) return;
+    
+    let buildingType: 'standard' | 'highlighted' | 'inactive' = 'standard';
+    
+    if (this.isSelected) {
+      buildingType = 'highlighted';
+    } else if (this.isParentSelected || this.isHovered) {
+      buildingType = 'highlighted';
+    }
+    
+    // Update main structure material
+    const nodeConfig = this.data.type ? NODE_TYPE_CONFIGS[this.data.type] : null;
+    const buildingColor = nodeConfig?.color || this.districtColor;
+    
+    const newMaterial = materialFactory.createBuildingMaterial({
+      buildingType,
+      nodeType: this.data.type,
+      color: buildingColor,
+    });
+    
+    this.mainStructure.material = newMaterial;
   }
 
   public setLOD(distance: number, lodLevels: [number, number, number]): void {
     const [high, medium, low] = lodLevels;
     
-    // Adjust visibility based on distance
-    this.effects.windows.forEach(window => {
-      window.visible = distance < medium;
-    });
-    
-    // Hide trails at far distances
-    this.effects.trails.forEach(trail => {
-      trail.visible = trail.visible && distance < high;
-    });
-    
-    // Reduce geometry detail for far objects
-    if (this.mainStructure && distance > medium) {
-      // Could implement geometry swapping here for even better performance
+    if (distance > low) {
+      // Low detail - hide windows and activity indicator
+      this.windowLights.forEach(light => {
+        light.mesh.visible = false;
+      });
+      if (this.activityIndicator) this.activityIndicator.visible = false;
+      if (this.beacon) this.beacon.visible = false;
+    } else if (distance > medium) {
+      // Medium detail - show beacon, hide windows
+      this.windowLights.forEach(light => {
+        light.mesh.visible = false;
+      });
+      if (this.activityIndicator) this.activityIndicator.visible = true;
+      if (this.beacon) this.beacon.visible = true;
+    } else {
+      // High detail - show everything
+      this.windowLights.forEach(light => {
+        light.mesh.visible = true;
+      });
+      if (this.activityIndicator) this.activityIndicator.visible = true;
+      if (this.beacon) this.beacon.visible = true;
     }
   }
 
@@ -330,38 +364,40 @@ export class Building {
       materialFactory.updateMaterialOpacity(this.mainStructure.material as THREE.Material, opacity);
     }
     
-    // Update effects
-    materialFactory.updateMaterialOpacity(this.effects.beacon.material as THREE.Material, opacity * 0.6);
-    materialFactory.updateMaterialOpacity(this.effects.activity.material as THREE.Material, opacity * 0.8);
+    // Update beacon
+    if (this.beacon) {
+      materialFactory.updateMaterialOpacity(this.beacon.material as THREE.Material, opacity * 0.6);
+    }
     
-    this.effects.windows.forEach(window => {
-      materialFactory.updateMaterialOpacity(window.material as THREE.Material, opacity * 0.3);
-    });
+    // Update activity indicator
+    if (this.activityIndicator) {
+      materialFactory.updateMaterialOpacity(this.activityIndicator.material as THREE.Material, opacity * 0.8);
+    }
     
-    this.effects.trails.forEach(trail => {
-      materialFactory.updateMaterialOpacity(trail.material as THREE.Material, opacity * 0.3);
+    // Update windows
+    this.windowLights.forEach(light => {
+      materialFactory.updateMaterialOpacity(
+        light.mesh.material as THREE.Material,
+        opacity * light.originalOpacity
+      );
     });
   }
 
-  public updateMetrics(metrics: { throughput?: number; latency?: number; errorRate?: number }): void {
-    // Update visual indicators based on metrics
-    if (metrics.errorRate !== undefined && metrics.errorRate > 0.05) {
-      // High error rate - make beacon red
-      materialFactory.updateMaterialColor(this.effects.beacon.material as THREE.Material, 0xff0000);
-    } else if (metrics.latency !== undefined && metrics.latency > 1000) {
-      // High latency - make beacon yellow
-      materialFactory.updateMaterialColor(this.effects.beacon.material as THREE.Material, 0xffff00);
-    } else {
-      // Normal - use node type color
-      const nodeColor = NODE_TYPE_CONFIGS[this.data.type || 'service'].color;
-      materialFactory.updateMaterialColor(this.effects.beacon.material as THREE.Material, nodeColor);
+  public updateMetrics(metrics: NodeData['metrics']): void {
+    if (!metrics) return;
+    
+    // Update activity based on throughput
+    const throughputNormalized = Math.min(metrics.throughput / 1000, 1);
+    
+    if (this.activityIndicator) {
+      const scale = 0.5 + throughputNormalized * 0.8;
+      this.activityIndicator.scale.setScalar(scale);
     }
     
-    // Adjust activity indicator based on throughput
-    if (metrics.throughput !== undefined) {
-      const normalizedThroughput = Math.min(metrics.throughput / 1000, 1); // Normalize to 0-1
-      const activityScale = 0.5 + normalizedThroughput * 0.5;
-      this.effects.activity.scale.setScalar(activityScale);
+    // Update beacon based on error rate
+    if (this.beacon && metrics.errorRate !== undefined) {
+      const errorColor = metrics.errorRate > 0.05 ? 0xff0000 : (this.data.type ? NODE_TYPE_CONFIGS[this.data.type].color : this.districtColor);
+      materialFactory.updateMaterialColor(this.beacon.material as THREE.Material, errorColor);
     }
   }
 
@@ -375,45 +411,16 @@ export class Building {
     return this.group.getWorldPosition(new THREE.Vector3());
   }
 
-  public getDistanceFromCamera(camera: THREE.Camera): number {
-    const worldPos = this.getWorldPosition();
-    return worldPos.distanceTo(camera.position);
-  }
-
-  private isActive(): boolean {
-    // Determine if building should show activity effects
-    return this.isSelected || this.isParentSelected || this.data.type === 'monitor';
-  }
-
-  public playAlert(): void {
-    // Play alert animation
-    if (!this.config.enableAnimations) return;
-    
-    const alertAnimation = () => {
-      materialFactory.updateMaterialColor(this.effects.beacon.material as THREE.Material, 0xff0000);
-      
-      setTimeout(() => {
-        const nodeColor = NODE_TYPE_CONFIGS[this.data.type || 'service'].color;
-        materialFactory.updateMaterialColor(this.effects.beacon.material as THREE.Material, nodeColor);
-      }, 500);
-    };
-    
-    alertAnimation();
-    setTimeout(alertAnimation, 600);
-    setTimeout(alertAnimation, 1200);
-  }
-
   public dispose(): void {
+    // Clear window lights
+    this.windowLights.length = 0;
+    
     // Remove from parent
     if (this.group.parent) {
       this.group.parent.remove(this.group);
     }
     
-    // Clear effects arrays
-    this.effects.windows.length = 0;
-    this.effects.trails.length = 0;
-    
-    // Geometries and materials are managed by factories
+    // Geometries and materials are handled by factories
   }
 
   // Getters
@@ -425,8 +432,8 @@ export class Building {
     return this.data.name;
   }
 
-  public get type(): NodeType {
-    return this.data.type || 'service';
+  public get nodeType(): NodeType | undefined {
+    return this.data.type;
   }
 
   public get position(): THREE.Vector3 {
@@ -441,15 +448,11 @@ export class Building {
     return this.isHovered;
   }
 
-  public get parentSelected(): boolean {
-    return this.isParentSelected;
-  }
-
   public get height(): number {
-    return this.mainStructure?.userData.height || 0;
+    return this.mainStructure?.userData.height as number || 0;
   }
 
-  public get color(): number {
-    return NODE_TYPE_CONFIGS[this.data.type || 'service'].color;
+  public get metrics(): NodeData['metrics'] {
+    return this.data.metrics;
   }
 }
